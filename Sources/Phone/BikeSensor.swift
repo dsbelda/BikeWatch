@@ -1,8 +1,9 @@
 import CoreBluetooth
 import Observation
 
-/// Conecta con el primer periférico "SPORT01*" y lee FTMS Indoor Bike Data (0x2AD2)
-/// o, si no hay, Cycling Power Measurement (0x2A63).
+/// Conecta con el primer sensor que anuncie FTMS (0x1826), Cycling Power (0x1818) o
+/// Cycling Speed and Cadence (0x1816) y cuyo nombre empiece por el filtro de Ajustes (vacío = cualquiera).
+/// Lee Indoor Bike Data (0x2AD2), Cycling Power Measurement (0x2A63) o CSC Measurement (0x2A5B).
 @Observable
 final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     var status = "Parado"
@@ -17,11 +18,19 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     var onData: (() -> Void)?
 
     var connected: Bool { status == "Conectado" }
+    var deviceName = ""
+
+    // Ajustes (mismas claves que @AppStorage en SettingsView)
+    static let prefixKey = "sensorPrefix", estimateKey = "estimatePower"
+    private var namePrefix: String { (UserDefaults.standard.string(forKey: Self.prefixKey) ?? "").lowercased() }
+    /// Sensores sin potencia (cadencia) o bicis que la estiman mal: W = rpm × nivel.
+    private var estimatePower: Bool { UserDefaults.standard.bool(forKey: Self.estimateKey) }
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
-    private let namePrefix = "sport01"   // ponytail: filtro por nombre; cambiar si el nombre varía
-    private let ftms = CBUUID(string: "1826")
+    private let services = ["1826", "1818", "1816"].map { CBUUID(string: $0) }   // FTMS, Cycling Power, CSC
+    private let dataChars = ["2AD2", "2A63", "2A5B"].map { CBUUID(string: $0) }
+    private var lastCrank: (revs: Int, time: Int, at: Date)?
     /// La última bici conectada: se reconecta directamente sin buscar (funciona en segundo plano).
     private var savedID: UUID? {
         get { UserDefaults.standard.string(forKey: "bikeID").flatMap(UUID.init) }
@@ -41,13 +50,19 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         status = "Parado"; cadence = 0; power = 0; speed = 0
     }
 
+    /// Olvida el sensor guardado y busca otro (para cambiar de bici o de sensor).
+    func forget() {
+        savedID = nil; deviceName = ""
+        stop(); start()
+    }
+
     /// Al volver la app a primer plano sin conexión: busca de nuevo (la búsqueda en segundo plano es lenta).
     func kick() {
         guard let c = central, c.state == .poweredOn, !connected else { return }
         print("BLE kick")
         c.stopScan()
         connectSaved(c)
-        c.scanForPeripherals(withServices: [ftms])
+        c.scanForPeripherals(withServices: services)
     }
 
     func centralManagerDidUpdateState(_ c: CBCentralManager) {
@@ -55,7 +70,7 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         guard c.state == .poweredOn else { status = "Bluetooth no disponible"; return }
         status = "Buscando…"
         connectSaved(c)
-        c.scanForPeripherals(withServices: [ftms])
+        c.scanForPeripherals(withServices: services)
     }
 
     private func connectSaved(_ c: CBCentralManager) {
@@ -70,7 +85,7 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                         advertisementData: [String: Any], rssi: NSNumber) {
         let name = p.name ?? (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? ""
         print("BLE visto:", name, rssi, p.identifier)
-        guard name.isEmpty || name.lowercased().hasPrefix(namePrefix) else { return }
+        guard namePrefix.isEmpty || name.lowercased().hasPrefix(namePrefix) else { return }
         c.stopScan()
         if let pending = peripheral, pending.identifier != p.identifier { c.cancelPeripheralConnection(pending) }
         peripheral = p
@@ -83,7 +98,7 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             c.cancelPeripheralConnection(p)
             self.status = "Reintentando…"
             self.connectSaved(c)
-            c.scanForPeripherals(withServices: [self.ftms])
+            c.scanForPeripherals(withServices: self.services)
         }
     }
 
@@ -91,6 +106,8 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         print("BLE conectado")
         c.stopScan()
         savedID = p.identifier
+        deviceName = p.name ?? ""
+        lastCrank = nil
         status = "Preparando…"
         p.discoverServices(nil)
     }
@@ -116,7 +133,7 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         print("BLE chars", s.uuid, s.characteristics?.map(\.uuid) as Any)
         // Debug: capacidades de la bici (FTMS Feature 2ACC, rango de resistencia 2AD6, rango de potencia 2AD8)
         for ch in s.characteristics ?? [] where ["2ACC", "2AD6", "2AD8"].contains(ch.uuid.uuidString) { p.readValue(for: ch) }
-        for ch in s.characteristics ?? [] where ch.uuid == CBUUID(string: "2AD2") || ch.uuid == CBUUID(string: "2A63") {
+        for ch in s.characteristics ?? [] where dataChars.contains(ch.uuid) {
             p.setNotifyValue(true, for: ch)
             status = "Conectado"
         }
@@ -125,9 +142,12 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic, error: Error?) {
         guard let d = ch.value else { return }
         print("BLE dato", ch.uuid, d.map { String(format: "%02X", $0) }.joined(separator: " "))
-        guard ch.uuid == CBUUID(string: "2AD2") || ch.uuid == CBUUID(string: "2A63") else { return }   // las lecturas de debug no son datos
-        if ch.uuid == CBUUID(string: "2AD2") { parseBikeData([UInt8](d)) }
-        else { parsePower([UInt8](d)) }
+        guard dataChars.contains(ch.uuid) else { return }   // las lecturas de debug no son datos
+        switch ch.uuid.uuidString {
+        case "2AD2": parseBikeData([UInt8](d))
+        case "2A63": parsePower([UInt8](d))
+        default: parseCSC([UInt8](d))
+        }
         onData?()
     }
 
@@ -145,15 +165,47 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         if has(3) { i += 2 }                                        // cad. media
         if has(4) { i += 3 }                                        // distancia
         if has(5) { if i + 2 <= b.count { print("BLE resistencia:", u16(i)) }; i += 2 }   // resistencia
-        if has(6), i + 2 <= b.count { print("BLE potencia de la bici:", Int16(bitPattern: UInt16(u16(i))), "W, vel. bici:", speed) }
-        // La bici estima W solo con rpm (ignora el tornillo): se recalcula con el nivel y de ahí la velocidad.
-        power = Int(Double(cadence) * Self.wattsPerRpmLevel * Double(level))
-        speed = power > 0 ? 1.35 * cbrt(Double(power)) * 3.6 : 0
+        if has(6), i + 2 <= b.count, !estimatePower { power = Int(Int16(bitPattern: UInt16(u16(i)))) }
+        else { estimateFromCadence() }
     }
 
-    // Cycling Power Measurement: flags(2) + potencia sint16
+    // Cycling Power Measurement: flags(2) + potencia sint16 + campos opcionales (cadencia en bit 5)
     private func parsePower(_ b: [UInt8]) {
         guard b.count >= 4 else { return }
+        let f = Int(b[0]) | Int(b[1]) << 8; var i = 4
+        if f & 1 != 0 { i += 1 }        // balance de pedales
+        if f & 4 != 0 { i += 2 }        // par acumulado
+        if f & 16 != 0 { i += 6 }       // vueltas de rueda
+        if f & 32 != 0 { crank(b, at: i) }
+        if estimatePower { estimateFromCadence(); return }
         power = Int(Int16(bitPattern: UInt16(b[2]) | UInt16(b[3]) << 8))
+        speed = speedFor(power)
     }
+
+    // CSC Measurement: flags(1) + vueltas de rueda (bit 0) + vueltas de biela (bit 1). Sin potencia: se estima.
+    private func parseCSC(_ b: [UInt8]) {
+        guard b.count >= 1 else { return }
+        let i = b[0] & 1 != 0 ? 7 : 1
+        if b[0] & 2 != 0 { crank(b, at: i) }
+        estimateFromCadence()
+    }
+
+    /// Cadencia a partir de vueltas acumuladas de biela (uint16) y hora del último evento (uint16, 1/1024 s).
+    private func crank(_ b: [UInt8], at i: Int) {
+        guard i + 4 <= b.count else { return }
+        let revs = Int(b[i]) | Int(b[i + 1]) << 8, time = Int(b[i + 2]) | Int(b[i + 3]) << 8
+        defer { if lastCrank?.revs != revs || lastCrank == nil { lastCrank = (revs, time, Date()) } }
+        guard let last = lastCrank else { return }
+        let dr = (revs - last.revs) & 0xFFFF, dt = (time - last.time) & 0xFFFF
+        if dr > 0, dt > 0 { cadence = dr * 60 * 1024 / dt }
+        else if Date().timeIntervalSince(last.at) > 3 { cadence = 0 }   // sin pedaladas nuevas: parado
+    }
+
+    /// Bicis sin medidor de potencia: W según cadencia y nivel del tornillo, y de ahí la velocidad.
+    private func estimateFromCadence() {
+        power = Int(Double(cadence) * Self.wattsPerRpmLevel * Double(level))
+        speed = speedFor(power)
+    }
+
+    private func speedFor(_ w: Int) -> Double { w > 0 ? 1.35 * cbrt(Double(w)) * 3.6 : 0 }
 }

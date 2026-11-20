@@ -37,7 +37,7 @@ struct LiveView: View {
             .toolbar {
                 Button("Ajustes", systemImage: "slider.horizontal.3") { settings = true }
             }
-            .sheet(isPresented: $settings) { SettingsView() }
+            .sheet(isPresented: $settings) { SettingsView(sensor: m.sensor) }
             .sheet(isPresented: $finishing) { FinishSheet(m: m) }
         }
     }
@@ -216,7 +216,10 @@ struct FinishSheet: View {
 // MARK: - Ajustes
 
 struct SettingsView: View {
+    let sensor: BikeSensor
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(BikeSensor.prefixKey) private var prefix = ""
+    @AppStorage(BikeSensor.estimateKey) private var estimate = false
     @AppStorage("voice") private var voice = true
     @AppStorage("voiceKm") private var voiceKm = true
     @AppStorage("voiceMinutes") private var voiceMinutes = 5
@@ -225,6 +228,17 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    LabeledContent("Conectado a", value: sensor.deviceName.isEmpty ? sensor.status : sensor.deviceName)
+                    TextField("Filtro por nombre (vacío = cualquiera)", text: $prefix)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    Toggle("Estimar potencia con el nivel", systemImage: "function", isOn: $estimate)
+                    Button("Olvidar y buscar otro sensor", systemImage: "arrow.triangle.2.circlepath") { sensor.forget() }
+                } header: {
+                    Text("Sensor")
+                } footer: {
+                    Text("Vale cualquier bici o sensor Bluetooth con FTMS, potencia (Cycling Power) o cadencia (Speed and Cadence). Si el sensor no mide potencia, se estima con la cadencia y el nivel.")
+                }
                 Section {
                     Toggle("Avisos por voz", systemImage: "speaker.wave.2.fill", isOn: $voice.animation())
                     if voice {

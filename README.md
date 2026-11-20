@@ -1,13 +1,14 @@
 # BikeWatch
 
-> App de iPhone y Apple Watch para entrenar en bici estática con cualquier sensor Bluetooth estándar.
+> App de iPhone y Apple Watch para entrenar en bici estática con cualquier bici o sensor Bluetooth estándar.
 
 El iPhone se conecta a la bici por Bluetooth Low Energy, muestra cadencia, potencia y velocidad en tiempo real y guarda cada sesión. El Apple Watch lleva la sesión de entrenamiento de HealthKit (pulso y calorías) y la guarda en la app Salud. Los dos dispositivos se sincronizan durante el entrenamiento.
 
 ## Funcionalidades
 
 **iPhone**
-- Conexión BLE con perfil **FTMS** (*Indoor Bike Data*) y alternativa **Cycling Power**.
+- Compatible con los perfiles Bluetooth estándar: **FTMS** (bicis y rodillos inteligentes), **Cycling Power** (potenciómetros) y **Cycling Speed and Cadence** (sensores de cadencia).
+- Sensor configurable en Ajustes: filtro por nombre, "olvidar y buscar otro" y potencia medida o estimada con la cadencia y el nivel de resistencia.
 - Métricas en directo: cadencia, potencia y velocidad.
 - Avisos por voz con parciales (entrenador).
 - Historial de entrenamientos con gráficas (Swift Charts).
@@ -24,7 +25,7 @@ El iPhone se conecta a la bici por Bluetooth Low Energy, muestra cadencia, poten
 | Área | Tecnología |
 |---|---|
 | UI | SwiftUI, Observation |
-| Sensores | CoreBluetooth (FTMS, Cycling Power) |
+| Sensores | CoreBluetooth (FTMS, Cycling Power, Cycling Speed and Cadence) |
 | Salud | HealthKit, sesión de entrenamiento espejada (`sendToRemoteWorkoutSession`) |
 | Sistema | ActivityKit + WidgetKit, App Intents, AVFoundation (voz), Charts |
 | Proyecto | XcodeGen (`project.yml`) |
@@ -51,7 +52,7 @@ Bici (BLE) ──► iPhone: BikeSensor ──► PhoneModel ──► Vistas / 
 
 - Xcode 26 o superior, iOS 26 y watchOS 26.
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`.
-- Una bici o sensor que anuncie un nombre que empiece por `SPORT01`. El prefijo se cambia en `Sources/Phone/BikeSensor.swift`.
+- Una bici o sensor Bluetooth con FTMS, Cycling Power o Cycling Speed and Cadence. Se conecta al primero que encuentra; en **Ajustes → Sensor** puedes filtrar por nombre o cambiar de sensor.
 
 ## Puesta en marcha
 
@@ -76,6 +77,7 @@ El script instala la app del reloj directamente desde el Mac: con iOS 27 y watch
 - [ ] Planes de entrenamiento por intervalos
 - [ ] Exportación a FIT/TCX
 - [ ] Control de resistencia (FTMS Control Point)
+- [ ] Selector de sensor con lista de dispositivos cercanos
 
 ## Licencia
 
