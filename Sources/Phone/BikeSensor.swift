@@ -39,7 +39,6 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func start() {
         guard central == nil else { return }
-        setvbuf(stdout, nil, _IOLBF, 0)   // debug: que cada print llegue a la consola de devicectl al instante
         central = CBCentralManager(delegate: self, queue: nil)
     }
 
@@ -59,14 +58,12 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     /// Al volver la app a primer plano sin conexión: busca de nuevo (la búsqueda en segundo plano es lenta).
     func kick() {
         guard let c = central, c.state == .poweredOn, !connected else { return }
-        print("BLE kick")
         c.stopScan()
         connectSaved(c)
         c.scanForPeripherals(withServices: services)
     }
 
     func centralManagerDidUpdateState(_ c: CBCentralManager) {
-        print("BLE state:", c.state.rawValue)
         guard c.state == .poweredOn else { status = "Bluetooth no disponible"; return }
         status = "Buscando…"
         connectSaved(c)
@@ -75,7 +72,6 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     private func connectSaved(_ c: CBCentralManager) {
         guard let id = savedID, let p = c.retrievePeripherals(withIdentifiers: [id]).first else { return }
-        print("BLE reconectando a la bici guardada")
         peripheral = p
         p.delegate = self
         c.connect(p)   // sin límite de tiempo: se completa en cuanto la bici emite
@@ -84,7 +80,6 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral,
                         advertisementData: [String: Any], rssi: NSNumber) {
         let name = p.name ?? (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? ""
-        print("BLE visto:", name, rssi, p.identifier)
         guard namePrefix.isEmpty || name.lowercased().hasPrefix(namePrefix) else { return }
         c.stopScan()
         if let pending = peripheral, pending.identifier != p.identifier { c.cancelPeripheralConnection(pending) }
@@ -94,7 +89,6 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         c.connect(p)
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
             guard let self, self.central === c, p.state != .connected else { return }
-            print("BLE timeout, reintentando búsqueda")
             c.cancelPeripheralConnection(p)
             self.status = "Reintentando…"
             self.connectSaved(c)
@@ -103,7 +97,6 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
-        print("BLE conectado")
         c.stopScan()
         savedID = p.identifier
         deviceName = p.name ?? ""
@@ -113,26 +106,20 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
-        print("BLE fallo:", error as Any)
         status = "Fallo: \(error?.localizedDescription ?? "?") (¿iPhone conectado?)"
     }
 
     func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
-        print("BLE desconectado:", error as Any)
         guard central === c else { return }
         status = "Desconectado, reintentando…"
         c.connect(p)
     }
 
     func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {
-        print("BLE servicios:", p.services?.map(\.uuid) as Any, error as Any)
         p.services?.forEach { p.discoverCharacteristics(nil, for: $0) }
     }
 
     func peripheral(_ p: CBPeripheral, didDiscoverCharacteristicsFor s: CBService, error: Error?) {
-        print("BLE chars", s.uuid, s.characteristics?.map(\.uuid) as Any)
-        // Debug: capacidades de la bici (FTMS Feature 2ACC, rango de resistencia 2AD6, rango de potencia 2AD8)
-        for ch in s.characteristics ?? [] where ["2ACC", "2AD6", "2AD8"].contains(ch.uuid.uuidString) { p.readValue(for: ch) }
         for ch in s.characteristics ?? [] where dataChars.contains(ch.uuid) {
             p.setNotifyValue(true, for: ch)
             status = "Conectado"
@@ -141,8 +128,6 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic, error: Error?) {
         guard let d = ch.value else { return }
-        print("BLE dato", ch.uuid, d.map { String(format: "%02X", $0) }.joined(separator: " "))
-        guard dataChars.contains(ch.uuid) else { return }   // las lecturas de debug no son datos
         switch ch.uuid.uuidString {
         case "2AD2": parseBikeData([UInt8](d))
         case "2A63": parsePower([UInt8](d))
@@ -157,14 +142,12 @@ final class BikeSensor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         func u16(_ i: Int) -> Int { Int(b[i]) | Int(b[i + 1]) << 8 }
         let f = u16(0); var i = 2
         func has(_ bit: Int) -> Bool { f & (1 << bit) != 0 }
-        let campos = ["vel.media", "cad", "cad.media", "dist", "resistencia", "potencia", "pot.media", "energía", "pulso", "MET", "tiempo", "restante"]
-        print("BLE flags", String(f, radix: 2), "campos:", campos.enumerated().filter { has($0.offset + 1) }.map(\.element))
         if !has(0), i + 2 <= b.count { speed = Double(u16(i)) / 100; i += 2 }
         if has(1) { i += 2 }                                        // vel. media
         if has(2), i + 2 <= b.count { cadence = u16(i) / 2; i += 2 } // 0.5 rpm
         if has(3) { i += 2 }                                        // cad. media
         if has(4) { i += 3 }                                        // distancia
-        if has(5) { if i + 2 <= b.count { print("BLE resistencia:", u16(i)) }; i += 2 }   // resistencia
+        if has(5) { i += 2 }                                        // resistencia
         if has(6), i + 2 <= b.count, !estimatePower { power = Int(Int16(bitPattern: UInt16(u16(i)))) }
         else { estimateFromCadence() }
     }
